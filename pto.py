@@ -132,6 +132,7 @@ def _open_payload(order):
         "activation_price": _required_text(order, "price"),
         "is_gte": side == "Open Short", "price_type": 3,
         "price_offset": PRICE_OFFSET, "text": "apiv4",
+        "pos_margin_mode": "cross", "position_mode": "dual_plus"
     }
 
 
