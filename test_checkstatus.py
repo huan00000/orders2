@@ -37,11 +37,11 @@ class CheckStatusTests(unittest.TestCase):
         response = mock.Mock(status_code=http_status, text="response")
         response.json.return_value = {
             "code": code, "message": "ok",
-            "data": {"order": {"id": order_id, "status": status}},
+            "data": {"order": {"id": order_id, "status_code": status}},
         }
         return response
 
-    def test_open_is_retained_and_finished_moves_to_matching_list(self):
+    def test_pending_is_retained_and_success_moves_to_matching_list(self):
         self._write({
             "pending open orders": [order("1"), order("2")],
             "finished open orders": [],
@@ -49,9 +49,9 @@ class CheckStatusTests(unittest.TestCase):
             "finished close orders": [],
         })
         result, saved, session = self._run([
-            self._response("1", "open"),
-            self._response("2", "finished"),
-            self._response("3", "finished"),
+            self._response("1", "pending"),
+            self._response("2", "success"),
+            self._response("3", "success"),
         ])
 
         self.assertEqual(result, {"open": 1, "finished": 2, "deleted": 0, "failed": 0})

@@ -44,7 +44,7 @@ class WorkflowTests(unittest.TestCase):
                     body = json.dumps({"code": 0, "data": {"id": 2 if payload["reduce_only"] else 1}, "timestamp": "2"})
                 elif "/detail?" in request.url:
                     order_id = request.url.split("id=")[1]
-                    body = json.dumps({"code": 0, "data": {"order": {"id": order_id, "status": "finished"}}})
+                    body = json.dumps({"code": 0, "data": {"order": {"id": order_id, "status_code": "success"}}})
                 elif request.url.endswith("/accounts"):
                     self.assertEqual(kwargs["timeout"], 20)
                     body = '{"cross_available": "10"}'

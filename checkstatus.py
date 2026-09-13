@@ -126,7 +126,7 @@ def _fetch_status(session, order_id):
         result = response.json()
         returned_order = result["data"]["order"]
         returned_id = str(returned_order["id"]).strip()
-        status = returned_order["status"]
+        status_code = returned_order["status_code"]
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CheckStatusError(f"订单 {order_id} 的响应格式无效: {response.text}") from exc
 
@@ -134,9 +134,9 @@ def _fetch_status(session, order_id):
         raise CheckStatusError(f"订单 {order_id} 的 API 响应未表示成功: {result!r}")
     if returned_id != order_id:
         raise CheckStatusError(f"订单 ID 不匹配：请求 {order_id}，返回 {returned_id}")
-    if not isinstance(status, str) or not status.strip():
-        raise CheckStatusError(f"订单 {order_id} 的 status 无效: {status!r}")
-    return status.strip().lower()
+    if not isinstance(status_code, str) or not status_code.strip():
+        raise CheckStatusError(f"订单 {order_id} 的 status_code 无效: {status_code!r}")
+    return status_code.strip().lower()
 
 
 def _process_once(session):
@@ -152,15 +152,15 @@ def _process_once(session):
             for order in list(root[pending_field]):
                 try:
                     order_id = _required_order_id(order)
-                    status = _fetch_status(session, order_id)
+                    status_code = _fetch_status(session, order_id)
                 except Exception:
                     counts["failed"] += 1
                     logger.exception("查询 %s 中的订单失败，保留本地数据: %r", pending_field, order)
                     continue
 
-                if status == "open":
+                if status_code == "pending":
                     counts["open"] += 1
-                elif status == "finished":
+                elif status_code == "success":
                     order["status"] = "finished"
                     root[pending_field].remove(order)
                     root[finished_field].append(order)
@@ -170,7 +170,7 @@ def _process_once(session):
                     root[pending_field].remove(order)
                     counts["deleted"] += 1
                     changed = True
-                    logger.warning("订单 %s 状态为 %s，已从 %s 删除", order_id, status, pending_field)
+                    logger.warning("订单 %s 状态为 %s，已从 %s 删除", order_id, status_code, pending_field)
 
         if changed:
             _write_order_list(data)
