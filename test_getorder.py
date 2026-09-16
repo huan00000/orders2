@@ -68,13 +68,19 @@ class ProcessOnceTests(unittest.TestCase):
         session.post.return_value.raise_for_status.return_value = None
         return session
 
-    def test_stops_matching_pending_open_before_adding_raw_order(self):
+    def test_stops_all_pending_open_before_adding_raw_order(self):
         self._write_orders({
             "last timestamp": 0,
             "raw orders": [],
             "pending open orders": [{
                 "id": "10282989", "timestamp": "1788869000000",
                 "Contract": "DOGE_USDT", "side": "Open Short",
+            }, {
+                "id": "10282990", "Contract": "BTC_USDT", "side": "Open Short",
+            }, {
+                "id": "10282991", "Contract": "DOGE_USDT", "side": "Open Long",
+            }, {
+                "id": "10282989", "Contract": "DOGE_USDT", "side": "Open Short",
             }],
             "finished open orders": [],
         })
@@ -86,12 +92,14 @@ class ProcessOnceTests(unittest.TestCase):
             added = getorder._process_once(session)
 
         self.assertEqual(added, 1)
-        session.post.assert_called_once()
-        self.assertEqual(session.post.call_args.kwargs["data"], '{"id":10282989}')
+        self.assertEqual(
+            [json.loads(call.kwargs["data"])["id"] for call in session.post.call_args_list],
+            [10282989, 10282990, 10282991],
+        )
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(len(saved["raw orders"]), 1)
 
-    def test_recent_finished_open_filters_order_without_stopping_open(self):
+    def test_recent_finished_open_filters_order_but_still_stops_pending_open(self):
         now_ms = 1788869900000
         self._write_orders({
             "last timestamp": 0,
@@ -109,11 +117,13 @@ class ProcessOnceTests(unittest.TestCase):
 
         with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
              mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
-             mock.patch.object(getorder.time, "time", return_value=now_ms / 1000):
+             mock.patch.object(getorder.time, "time", return_value=now_ms / 1000), \
+             mock.patch.object(getorder, "gen_sign", return_value={"SIGN": "test"}):
             added = getorder._process_once(session)
 
         self.assertEqual(added, 0)
-        session.post.assert_not_called()
+        session.post.assert_called_once()
+        self.assertEqual(session.post.call_args.kwargs["data"], '{"id":10282989}')
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(saved["raw orders"], [])
         self.assertEqual(saved["last timestamp"], 1788869865421)
