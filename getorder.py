@@ -209,14 +209,11 @@ def _process_once(session):
         ]
 
         stopped_ids = set()
-        for order in accepted:
-            for pending in root["pending open orders"]:
-                if not _same_contract_and_side(order, pending):
-                    continue
-                order_id = str(pending.get("id", "")).strip()
-                if order_id not in stopped_ids:
-                    _stop_trailing_order(session, order_id)
-                    stopped_ids.add(order_id)
+        for pending in root["pending open orders"]:
+            order_id = str(pending.get("id", "")).strip()
+            if order_id not in stopped_ids:
+                _stop_trailing_order(session, order_id)
+                stopped_ids.add(order_id)
 
         root["raw orders"].extend(accepted)
         # 即使全部订单被过滤，也消费这次远程时间戳。
