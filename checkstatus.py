@@ -171,7 +171,12 @@ def _process_once(session):
                         changed = True
                 elif status_code == "success":
                     order["status"] = "finished"
-                    order["tag"] = finished_field
+                    # 平仓来源标记供 pto._has_inverse 在完成后继续去重。
+                    if not (
+                        pending_field == "pending close orders"
+                        and str(order.get("tag", "")).startswith("pending close orders.inverse ")
+                    ):
+                        order["tag"] = finished_field
                     order["price"] = trigger_price
                     root[pending_field].remove(order)
                     root[finished_field].append(order)

@@ -44,7 +44,9 @@ class WorkflowTests(unittest.TestCase):
                     body = json.dumps({"code": 0, "data": {"id": 2 if payload["reduce_only"] else 1}, "timestamp": "2"})
                 elif "/detail?" in request.url:
                     order_id = request.url.split("id=")[1]
-                    body = json.dumps({"code": 0, "data": {"order": {"id": order_id, "status_code": "success"}}})
+                    body = json.dumps({"code": 0, "data": {"order": {
+                        "id": order_id, "status_code": "success", "trigger_price": "105",
+                    }}})
                 elif request.url.endswith("/accounts"):
                     self.assertEqual(kwargs["timeout"], 20)
                     body = '{"cross_available": "10"}'
@@ -60,8 +62,14 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(result["发布平仓"], 1)
                 saved = json.loads(orders.read_text(encoding="utf-8"))[0]
                 self.assertEqual(len(saved["finished open orders"]), 1)
+                self.assertEqual(saved["finished open orders"][0]["price"], "105")
+                self.assertEqual(saved["pending close orders"][0]["price"], "105.03255")
                 self.assertEqual(saved["pending close orders"][0]["tag"], "pending close orders.inverse 1")
                 self.assertEqual(main.process_once(session, 2)["发布平仓"], 0)
+                saved = json.loads(orders.read_text(encoding="utf-8"))[0]
+                self.assertEqual(saved["pending close orders"], [])
+                self.assertEqual(len(saved["finished close orders"]), 1)
+                self.assertEqual(saved["finished close orders"][0]["tag"], "pending close orders.inverse 1")
             self.assertEqual(sum(r.method == "POST" for r in calls), 2)
             log = (path / "logs.md").read_text(encoding="utf-8")
             for expected in ("第 1 轮", "第 2 轮", "reduce_only", "id=1", "HTTP 201", "[已脱敏]"):

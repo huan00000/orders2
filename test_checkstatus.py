@@ -39,6 +39,8 @@ class CheckStatusTests(unittest.TestCase):
             "code": code, "message": "ok",
             "data": {"order": {"id": order_id, "status_code": status}},
         }
+        if status == "success":
+            response.json.return_value["data"]["order"]["trigger_price"] = "105"
         return response
 
     def test_pending_is_retained_and_success_moves_to_matching_list(self):
@@ -57,8 +59,25 @@ class CheckStatusTests(unittest.TestCase):
         self.assertEqual(result, {"open": 1, "finished": 2, "deleted": 0, "failed": 0})
         self.assertEqual([item["id"] for item in saved["pending open orders"]], ["1"])
         self.assertEqual(saved["finished open orders"][0]["status"], "finished")
+        self.assertEqual(saved["finished open orders"][0]["price"], "105")
         self.assertEqual(saved["finished close orders"][0]["id"], "3")
+        self.assertEqual(saved["finished close orders"][0]["price"], "105")
         self.assertIn("?id=1", session.get.call_args_list[0].args[0])
+
+    def test_success_without_trigger_price_retains_local_order(self):
+        root = {
+            "pending open orders": [order("1")], "finished open orders": [],
+            "pending close orders": [], "finished close orders": [],
+        }
+        self._write(root)
+        response = self._response("1", "success")
+        del response.json.return_value["data"]["order"]["trigger_price"]
+
+        with self.assertLogs(checkstatus.logger, level="ERROR"):
+            result, saved, _ = self._run([response])
+
+        self.assertEqual(result, {"open": 0, "finished": 0, "deleted": 0, "failed": 1})
+        self.assertEqual(saved, root)
 
     def test_explicit_other_status_is_deleted(self):
         self._write({
