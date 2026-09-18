@@ -63,7 +63,12 @@ class WorkflowTests(unittest.TestCase):
                 saved = json.loads(orders.read_text(encoding="utf-8"))[0]
                 self.assertEqual(len(saved["finished open orders"]), 1)
                 self.assertEqual(saved["finished open orders"][0]["price"], "105")
-                self.assertEqual(saved["pending close orders"][0]["price"], "105.03255")
+                # The filled price has no decimal places, so the close target rounds to 105.
+                self.assertEqual(saved["pending close orders"][0]["price"], "105")
+                close_payloads = [json.loads(r.body) for r in calls if r.method == "POST"
+                                  and json.loads(r.body)["reduce_only"]]
+                self.assertEqual(len(close_payloads), 1)
+                self.assertEqual(close_payloads[0]["activation_price"], "105")
                 self.assertEqual(saved["pending close orders"][0]["tag"], "pending close orders.inverse 1")
                 self.assertEqual(main.process_once(session, 2)["发布平仓"], 0)
                 saved = json.loads(orders.read_text(encoding="utf-8"))[0]
