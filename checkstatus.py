@@ -158,7 +158,7 @@ def _process_once(session):
                     logger.exception("查询 %s 中的订单失败，保留本地数据: %r", pending_field, order)
                     continue
 
-                if status_code == "pending":
+                if status_code in ("pending", "ongoing"):
                     counts["open"] += 1
                 elif status_code == "success":
                     order["status"] = "finished"
