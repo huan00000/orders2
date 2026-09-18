@@ -145,7 +145,7 @@ def _target_price(order, available):
     try:
         price = Decimal(_required_text(order, "price"))
         value = Decimal(_required_text(order, "value"))
-        available = Decimal(str(available))
+        available = Decimal("0.01") * Decimal(str(available))
     except (InvalidOperation, ValueError) as exc:
         raise PtoError("price、value 和 available 必须是有效数字") from exc
     if price <= 0 or value == 0:

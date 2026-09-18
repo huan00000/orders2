@@ -57,7 +57,7 @@ class PtoCalculationTests(unittest.TestCase):
         order = {"Contract": "DOGE_USDT", "price": "100", "side": "Open Short",
                  "size": "-10", "value": "-1000"}
         side, target, payload = pto._close_details(order, Decimal("10"))
-        self.assertEqual((side, target), ("Close Short", "96.9"))
+        self.assertEqual((side, target), ("Close Short", "99.969"))
         self.assertEqual(payload["amount"], "10")
         self.assertFalse(payload["is_gte"])
 
@@ -65,13 +65,13 @@ class PtoCalculationTests(unittest.TestCase):
         order = {"Contract": "BTC_USDT", "price": "100", "side": "Open Long",
                  "size": "10", "value": "1000"}
         side, target, payload = pto._close_details(order, Decimal("10"))
-        self.assertEqual((side, target), ("Close Long", "103.1"))
+        self.assertEqual((side, target), ("Close Long", "100.031"))
         self.assertEqual(payload["amount"], "-10")
         self.assertTrue(payload["is_gte"])
 
     def test_non_positive_target_is_rejected(self):
         with self.assertRaisesRegex(pto.PtoError, "必须大于 0"):
-            pto._target_price({"price": "1", "value": "-1"}, 1)
+            pto._target_price({"price": "1", "value": "-1"}, 100)
 
     def test_pending_record_requires_value(self):
         source = {"Contract": "BTC_USDT"}

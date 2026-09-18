@@ -136,11 +136,14 @@ def _fetch_status(session, order_id):
         raise CheckStatusError(f"订单 ID 不匹配：请求 {order_id}，返回 {returned_id}")
     if not isinstance(status_code, str) or not status_code.strip():
         raise CheckStatusError(f"订单 {order_id} 的 status_code 无效: {status_code!r}")
-    return status_code.strip().lower()
+    status_code = status_code.strip().lower()
+    if status_code == "success" and returned_order.get("trigger_price") is None:
+        raise CheckStatusError(f"订单 {order_id} 的成功响应缺少 trigger_price")
+    return status_code, returned_order.get("trigger_price")
 
 
 def _process_once(session):
-    """处理一轮状态同步，返回 (仍为 open, 已完成, 已删除, 查询失败)。"""
+    """处理一轮状态同步，返回 open、finished、deleted、failed 分类计数。"""
     counts = {"open": 0, "finished": 0, "deleted": 0, "failed": 0}
     changed = False
 
@@ -152,7 +155,7 @@ def _process_once(session):
             for order in list(root[pending_field]):
                 try:
                     order_id = _required_order_id(order)
-                    status_code = _fetch_status(session, order_id)
+                    status_code, trigger_price = _fetch_status(session, order_id)
                 except Exception:
                     counts["failed"] += 1
                     logger.exception("查询 %s 中的订单失败，保留本地数据: %r", pending_field, order)
@@ -168,6 +171,8 @@ def _process_once(session):
                         changed = True
                 elif status_code == "success":
                     order["status"] = "finished"
+                    order["tag"] = finished_field
+                    order["price"] = trigger_price
                     root[pending_field].remove(order)
                     root[finished_field].append(order)
                     counts["finished"] += 1
