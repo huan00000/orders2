@@ -68,7 +68,7 @@ class ProcessOnceTests(unittest.TestCase):
         session.post.return_value.raise_for_status.return_value = None
         return session
 
-    def test_stops_all_pending_open_before_adding_raw_order(self):
+    def test_stops_only_matching_pending_once_before_adding_raw_order(self):
         self._write_orders({
             "last timestamp": 0,
             "raw orders": [],
@@ -94,12 +94,12 @@ class ProcessOnceTests(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(
             [json.loads(call.kwargs["data"])["id"] for call in session.post.call_args_list],
-            [10282989, 10282990, 10282991],
+            [10282989],
         )
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(len(saved["raw orders"]), 1)
 
-    def test_recent_finished_open_filters_order_but_still_stops_pending_open(self):
+    def test_recent_finished_open_filters_order_without_stopping_pending(self):
         now_ms = 1788869900000
         self._write_orders({
             "last timestamp": 0,
@@ -122,11 +122,44 @@ class ProcessOnceTests(unittest.TestCase):
             added = getorder._process_once(session)
 
         self.assertEqual(added, 0)
-        session.post.assert_called_once()
-        self.assertEqual(session.post.call_args.kwargs["data"], '{"id":10282989}')
+        session.post.assert_not_called()
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(saved["raw orders"], [])
         self.assertEqual(saved["last timestamp"], 1788869865421)
+
+    def test_ongoing_blocks_only_same_contract_and_side(self):
+        for contract, side, blocked in [
+            ("DOGE_USDT", "Open Short", True),
+            ("DOGE_USDT", "Open Long", False),
+            ("BTC_USDT", "Open Short", False),
+        ]:
+            with self.subTest(contract=contract, side=side):
+                pending = [
+                    {"id": "101", "Contract": "DOGE_USDT", "side": "Open Short",
+                     "tag": "pending open orders"},
+                    {"id": "102", "Contract": contract, "side": side,
+                     "tag": "ongoing open orders"},
+                ]
+                self._write_orders({
+                    "last timestamp": 0, "raw orders": [],
+                    "pending open orders": pending, "finished open orders": [],
+                })
+                session = self._session()
+                with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
+                     mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
+                     mock.patch.object(getorder, "gen_sign", return_value={}):
+                    added = getorder._process_once(session)
+
+                self.assertEqual(added, 0 if blocked else 1)
+                if blocked:
+                    session.post.assert_not_called()
+                else:
+                    session.post.assert_called_once()
+                    self.assertEqual(json.loads(session.post.call_args.kwargs["data"]), {"id": 101})
+                saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
+                self.assertEqual(len(saved["raw orders"]), added)
+                self.assertEqual(saved["pending open orders"], pending)
+                self.assertEqual(saved["last timestamp"], 1788869865421)
 
 
 if __name__ == "__main__":

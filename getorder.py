@@ -206,6 +206,12 @@ def _process_once(session):
                 _recent_finished_blocks(order, finished, now_ms)
                 for finished in root["finished open orders"]
             )
+            # 同币种同方向已有 ongoing 订单时，保留旧单并拦截新单。
+            and not any(
+                _same_contract_and_side(order, pending)
+                and pending.get("tag") == "ongoing open orders"
+                for pending in root["pending open orders"]
+            )
         ]
 
         stopped_ids = set()
@@ -213,7 +219,7 @@ def _process_once(session):
             for pending in root["pending open orders"]:
                 if not _same_contract_and_side(order, pending):
                     continue
-                if pending.get("tag") != "ongoing open orders":
+                if pending.get("tag") == "ongoing open orders":
                     continue
                 order_id = str(pending.get("id", "")).strip()
                 if order_id not in stopped_ids:
