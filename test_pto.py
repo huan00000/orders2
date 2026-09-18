@@ -101,7 +101,7 @@ class PtoCalculationTests(unittest.TestCase):
         order = {"Contract": "DOGE_USDT", "price": "100", "side": "Open Short",
                  "size": "-10", "value": "-1000"}
         side, target, payload = pto._close_details(order, Decimal("10"))
-        self.assertEqual((side, target), ("Close Short", "99.969"))
+        self.assertEqual((side, target), ("Close Short", "100"))
         self.assertEqual(payload["amount"], "10")
         self.assertFalse(payload["is_gte"])
 
@@ -109,9 +109,32 @@ class PtoCalculationTests(unittest.TestCase):
         order = {"Contract": "BTC_USDT", "price": "100", "side": "Open Long",
                  "size": "10", "value": "1000"}
         side, target, payload = pto._close_details(order, Decimal("10"))
-        self.assertEqual((side, target), ("Close Long", "100.031"))
+        self.assertEqual((side, target), ("Close Long", "100"))
         self.assertEqual(payload["amount"], "-10")
         self.assertTrue(payload["is_gte"])
+
+    def test_close_target_matches_source_price_precision(self):
+        for price, value, expected in (
+            ("90.407", "100", "93.210"),
+            ("90.40", "100", "93.20"),
+            ("90", "100", "93"),
+            ("0.00100", "100", "0.00103"),
+            ("1.00", "62", "1.05"),
+            ("90.407", "-100", "87.604"),
+        ):
+            with self.subTest(price=price, value=value):
+                order = {"Contract": "TEST_USDT", "price": price,
+                         "side": "Open Long" if Decimal(value) > 0 else "Open Short",
+                         "size": "10", "value": value}
+                _, target, payload = pto._close_details(order, 100)
+                self.assertEqual(target, expected)
+                self.assertEqual(payload["activation_price"], expected)
+
+    def test_close_target_rounded_to_zero_is_rejected(self):
+        order = {"Contract": "TEST_USDT", "price": "1", "value": "-4",
+                 "side": "Open Short", "size": "-10"}
+        with self.assertRaisesRegex(pto.PtoError, "必须大于 0"):
+            pto._close_details(order, 100)
 
     def test_non_positive_target_is_rejected(self):
         with self.assertRaisesRegex(pto.PtoError, "必须大于 0"):

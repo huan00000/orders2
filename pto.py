@@ -8,7 +8,7 @@ import os
 import tempfile
 import time
 from contextlib import contextmanager
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 import requests
@@ -178,7 +178,14 @@ def _close_details(order, available):
     if close_size == 0:
         raise PtoError("size 不能为 0")
     close_side, is_gte = mapping[side]
-    target = _target_price(order, available)
+    target = Decimal(_target_price(order, available))
+    # 按对应 finished open order 的 price 小数位数四舍五入，并保留末尾零。
+    price = Decimal(_required_text(order, "price"))
+    step = Decimal("1").scaleb(min(price.as_tuple().exponent, 0))
+    target = target.quantize(step, rounding=ROUND_HALF_UP)
+    if target <= 0:
+        raise PtoError(f"按 price 精度取整后的 target price 必须大于 0，实际为 {target}")
+    target = format(target, "f")
     payload = {
         "reduce_only": True, "contract": _required_text(order, "Contract"),
         "amount": _decimal_text(close_size), "activation_price": target,
