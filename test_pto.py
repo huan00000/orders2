@@ -30,6 +30,50 @@ class PtoResponseTests(unittest.TestCase):
                     pto._create_trailing_order(self.session(status, code), {})
 
     @patch.object(pto, "gen_sign", return_value={})
+    def test_business_failure_without_data(self, sign):
+        session = self.session()
+        response = session.post.return_value
+        response.json.return_value = {
+            "code": -1, "message": "Invalid request", "timestamp": 1789737236268,
+        }
+        response.text = pto.json.dumps(response.json.return_value)
+        with self.assertRaisesRegex(pto.PtoError, "code=-1, message=Invalid request") as caught:
+            pto._create_trailing_order(session, {})
+        self.assertIsNone(caught.exception.__cause__)
+        session.post.assert_called_once()
+
+    @patch.object(pto, "gen_sign", return_value={})
+    def test_success_with_missing_fields_is_rejected(self, sign):
+        for data in (None, {}, {"id": None}, {"id": " "}):
+            with self.subTest(data=data):
+                session = self.session()
+                session.post.return_value.json.return_value["data"] = data
+                with self.assertRaisesRegex(pto.PtoError, "响应格式无效"):
+                    pto._create_trailing_order(session, {})
+
+    @patch.object(pto, "gen_sign", return_value={})
+    def test_inverse_rejection_does_not_write_pending_order(self, sign):
+        order = {"id": "123", "Contract": "BTC_USDT", "price": "100",
+                 "side": "Open Long", "size": "10", "value": "1000"}
+        root = {"finished open orders": [order], "pending close orders": [],
+                "finished close orders": []}
+        session = self.session(code=-1)
+        del session.post.return_value.json.return_value["data"]
+        with patch.object(pto, "_order_file_lock"), \
+                patch.object(pto, "_load_order_list", return_value=[root]), \
+                patch.object(pto, "gavailable", return_value=10), \
+                patch.object(pto, "_write_order_list") as write, \
+                self.assertLogs(pto.logger, level="ERROR"):
+            self.assertEqual(pto.inverse_pto(session), 0)
+            self.assertEqual(root["pending close orders"], [])
+            self.assertEqual(root["finished open orders"], [order])
+            write.assert_not_called()
+        payload = pto.json.loads(session.post.call_args.kwargs["data"])
+        self.assertEqual(payload["position_mode"], "dual_plus")
+        self.assertEqual(payload["pos_margin_mode"], "cross")
+        self.assertTrue(payload["reduce_only"])
+
+    @patch.object(pto, "gen_sign", return_value={})
     def test_http_200_moves_raw_order_to_pending(self, sign):
         order = {"Contract": "DOGE_USDT", "price": "0.1", "side": "Open Short",
                  "size": "-10", "value": "-1"}

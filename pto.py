@@ -22,6 +22,8 @@ CREATE_URL = "/futures/usdt/autoorder/v1/trail/create"
 POLL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 20
 PRICE_OFFSET = "1%"
+POS_MARGIN_MODE = "cross"
+POSITION_MODE = "dual_plus"
 _BASE_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent))
 ORDER_LIST_PATH = _BASE_DIR / "orderlist.js"
 LOCK_PATH = _BASE_DIR / "orderlist.js.lock"
@@ -113,12 +115,20 @@ def _create_trailing_order(session, payload):
         result = response.json()
         if not isinstance(result, dict):
             raise TypeError("响应 JSON 不是对象")
-        order_id = str(result["data"]["id"]).strip()
-        timestamp = str(result["timestamp"]).strip()
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise PtoError(f"创建订单响应格式无效: {response.text}") from exc
-    if result.get("code") != 0 or not order_id or not timestamp:
-        raise PtoError(f"创建订单响应未表示成功: {result}")
+    # HTTP 成功不代表业务成功；失败响应通常不包含 data。
+    if result.get("code") != 0:
+        raise PtoError(
+            f"创建订单被接口拒绝: code={result.get('code')}, "
+            f"message={result.get('message')}, timestamp={result.get('timestamp')}; "
+            f"请求参数={body}"
+        )
+    try:
+        order_id = _required_text(result["data"], "id")
+        timestamp = _required_text(result, "timestamp")
+    except (KeyError, TypeError, AttributeError, PtoError) as exc:
+        raise PtoError(f"创建订单响应格式无效: {response.text}") from exc
     return order_id, timestamp
 
 
@@ -132,7 +142,7 @@ def _open_payload(order):
         "activation_price": _required_text(order, "price"),
         "is_gte": side == "Open Short", "price_type": 3,
         "price_offset": PRICE_OFFSET, "text": "apiv4",
-        "pos_margin_mode": "cross", "position_mode": "dual_plus"
+        "pos_margin_mode": POS_MARGIN_MODE, "position_mode": POSITION_MODE
     }
 
 
@@ -173,6 +183,7 @@ def _close_details(order, available):
         "reduce_only": True, "contract": _required_text(order, "Contract"),
         "amount": _decimal_text(close_size), "activation_price": target,
         "is_gte": is_gte, "price_type": 3, "price_offset": PRICE_OFFSET, "text": "apiv4",
+        "pos_margin_mode": POS_MARGIN_MODE, "position_mode": POSITION_MODE,
     }
     return close_side, target, payload
 
