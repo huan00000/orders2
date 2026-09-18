@@ -157,9 +157,15 @@ def _process_once(session):
                     counts["failed"] += 1
                     logger.exception("查询 %s 中的订单失败，保留本地数据: %r", pending_field, order)
                     continue
-
                 if status_code in ("pending", "ongoing"):
                     counts["open"] += 1
+                    if (
+                        status_code == "ongoing"
+                        and pending_field == "pending open orders"
+                        and order.get("tag") == "pending open orders"
+                    ):
+                        order["tag"] = "ongoing open orders"
+                        changed = True
                 elif status_code == "success":
                     order["status"] = "finished"
                     root[pending_field].remove(order)
