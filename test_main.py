@@ -17,16 +17,16 @@ from request_log import LoggedSession
 class WorkflowTests(unittest.TestCase):
     def test_full_cycle_and_no_duplicate_close(self):
         for side, size, mode, target in (
-            ("Open Long", 37, "dual_long", "102"),
-            ("Open Short", -37, "dual_short", "98"),
+            ("Open Long", 37, "dual_long", "104"),
+            ("Open Short", -37, "dual_short", "96"),
         ):
             with self.subTest(side=side):
                 self._full_cycle(side, size, mode, target)
 
     def test_full_cycle_replaces_existing_close(self):
         for side, size, mode, target in (
-            ("Open Long", 37, "dual_long", "102"),
-            ("Open Short", -37, "dual_short", "98"),
+            ("Open Long", 37, "dual_long", "104"),
+            ("Open Short", -37, "dual_short", "96"),
         ):
             with self.subTest(side=side):
                 self._full_cycle(side, size, mode, target, replace=True)
@@ -88,7 +88,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(result["发布平仓"], 1)
                 saved = json.loads(orders.read_text(encoding="utf-8"))[0]
                 self.assertEqual(saved["finished open orders"], [])
-                # 多仓 102.069、空仓 97.869，按成交价的整数精度取整。
+                # 多仓 104.131、空仓 95.931，按成交价的整数精度取整。
                 self.assertEqual(saved["pending close orders"][0]["price"], target)
                 close_payloads = [json.loads(r.body) for r in calls if r.method == "POST"
                                   and json.loads(r.body).get("reduce_only")]

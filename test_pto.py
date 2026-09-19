@@ -208,10 +208,10 @@ class InverseReplacementTests(unittest.TestCase):
 class PtoCalculationTests(unittest.TestCase):
     def test_target_price_applies_value_sign_by_size(self):
         for size, value, expected in (
-            (37, "1000", "102.069"),
-            (-37, "1000", "97.869"),
-            (37, "-1000", "95.931"),
-            (-37, "-1000", "104.131"),
+            (37, "1000", "104.131"),
+            (-37, "1000", "95.931"),
+            (37, "-1000", "97.869"),
+            (-37, "-1000", "102.069"),
         ):
             with self.subTest(size=size, value=value):
                 current = position(size=str(size), value=value)
@@ -225,7 +225,7 @@ class PtoCalculationTests(unittest.TestCase):
                 pto._target_price(position(size=-37, value=value))
 
     def test_zero_margin_retains_direction_adjustment(self):
-        for size, expected in ((37, "99"), (-37, "101")):
+        for size, expected in ((37, "101"), (-37, "99")):
             with self.subTest(size=size):
                 self.assertEqual(pto._target_price(position(size=size, initial_margin="0")), expected)
 
@@ -237,8 +237,8 @@ class PtoCalculationTests(unittest.TestCase):
 
     def test_close_uses_position_instead_of_source_values(self):
         for side, size, expected, is_gte in (
-            ("Open Long", 37, "102.069", True),
-            ("Open Short", -37, "97.869", False),
+            ("Open Long", 37, "104.131", True),
+            ("Open Short", -37, "95.931", False),
         ):
             with self.subTest(side=side):
                 order = {"Contract": "BTC_USDT", "price": "90.407", "side": side,
@@ -256,16 +256,16 @@ class PtoCalculationTests(unittest.TestCase):
         current = position(entry_price="88.077351351351", value="342.9974",
                            initial_margin="4.833976690667", size=-37)
         _, target, payload = pto._close_details(order, current)
-        self.assertEqual(target, "85.072")
+        self.assertEqual(target, "83.387")
         self.assertEqual(payload["amount"], "37")
 
     def test_close_target_matches_source_price_precision(self):
         for source, entry, expected in (
-            ("90.407", "100", "102.069"),
-            ("90.40", "100", "102.07"),
-            ("90", "100", "102"),
-            ("0.00100", "0.001", "0.00102"),
-            ("1.00", "0.5", "0.50"),
+            ("90.407", "100", "104.131"),
+            ("90.40", "100", "104.13"),
+            ("90", "100", "104"),
+            ("0.00100", "0.001", "0.00104"),
+            ("1.00", "0.5", "0.51"),
         ):
             with self.subTest(source=source):
                 order = {"Contract": "BTC_USDT", "price": source, "side": "Open Long"}
