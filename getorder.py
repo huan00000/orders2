@@ -1,5 +1,31 @@
 '''
+原工作流顺序为:
+1. 去 GitHub 读取 size.txt，提取币种、价格、做多还是做空、数量等信息。
+2. 看是不是新一批订单：根据时间戳判断，已经处理过的直接跳过。
+3. 筛掉重复或暂时不能开的订单，例如同一个币、同一个方向：
+    - 最近 7 天有已完成的开仓记录；
+    - 最近 7 天有待平仓记录；
+    - 已有标记为 ongoing open orders 的开仓订单。
 
+4. 处理旧追踪单：新订单通过筛选后，如果还有同币种、同方向、非 ongoing 的待开仓单，就调用 Gate 接口停止旧追踪单。
+5. 把新订单追加到本地 orderlist.js 的 raw orders，并更新“这批已经处理过”的时间戳。即使全部被筛掉，也更新时间戳。
+新预期: 顺序修改为:
+1. 处理旧追踪单：如果有待开仓单，就调用 Gate 接口停止旧追踪单。
+2. 去 GitHub 读取 size.txt，提取币种、价格、做多还是做空、数量等信息。
+3. 看是不是新一批订单：根据时间戳判断，已经处理过的直接跳过。
+4. 筛掉重复或暂时不能开的订单，例如同一个币、同一个方向：
+    - 最近 7 天有已完成的开仓记录；
+    - 最近 7 天有待平仓记录；
+    - 已有标记为 ongoing open orders 的开仓订单。
+
+5. 把新订单追加到本地 orderlist.js 的 raw orders，并更新“这批已经处理过”的时间戳。即使全部被筛掉，也更新时间戳。
+
+
+1. 第一步停止旧追踪单，是否停止 pending open orders 中所有非 ongoing 的订单，不再限制币种、方向？标记为 ongoing open orders 的订单是否仍保
+     留？
+答: 是. 是
+2. 停止成功后，是否从本地 pending open orders 删除对应记录？如果保留，新流程会在每轮读取 GitHub 前再次请求停止同一订单。
+答: 是. 不保留
 '''
 
 import json
@@ -209,6 +235,23 @@ def _stop_trailing_order(session, order_id):
 
 
 def _process_once(session):
+    # 清理独立于远程批次；逐个保存成功结果，后续失败也不会恢复已停订单。
+    with _order_file_lock():
+        data = _load_order_list()
+        root = data[0]
+        for pending in list(root["pending open orders"]):
+            if pending.get("tag") == "ongoing open orders":
+                continue
+            order_id = str(pending.get("id", "")).strip()
+            if not any(item is pending for item in root["pending open orders"]):
+                continue
+            _stop_trailing_order(session, order_id)
+            root["pending open orders"] = [
+                item for item in root["pending open orders"]
+                if item.get("tag") == "ongoing open orders"
+                or str(item.get("id", "")).strip() != order_id
+            ]
+            _write_order_list(data)
 
     response = session.get(ORDER_URL, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
@@ -240,18 +283,6 @@ def _process_once(session):
             )
         ]
 
-        stopped_ids = set()
-        for order in accepted:
-            for pending in root["pending open orders"]:
-                if not _same_contract_and_side(order, pending):
-                    continue
-                if pending.get("tag") == "ongoing open orders":
-                    continue
-                order_id = str(pending.get("id", "")).strip()
-                if order_id not in stopped_ids:
-                    _stop_trailing_order(session, order_id)
-                    stopped_ids.add(order_id)
-
         root["raw orders"].extend(accepted)
         # 即使全部订单被过滤，也消费这次远程时间戳。
         root["last timestamp"] = remote_timestamp
@@ -273,5 +304,5 @@ def get_order():
                 logger.info("订单轮询完成，新增 %d 条 raw orders", added)
             except Exception:
                 # 单次网络、解析或文件错误不能终止永久轮询。
-                logger.exception("订单轮询失败；本地订单文件未被本次操作覆盖")
+                logger.exception("订单轮询失败；已保存的停止订单结果保留，下轮重试")
             time.sleep(POLL_INTERVAL_SECONDS)

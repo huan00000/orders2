@@ -68,7 +68,7 @@ class ProcessOnceTests(unittest.TestCase):
         session.post.return_value.raise_for_status.return_value = None
         return session
 
-    def test_stops_only_matching_pending_once_before_adding_raw_order(self):
+    def test_stops_all_non_ongoing_pending_once_before_fetch(self):
         self._write_orders({
             "last timestamp": 0,
             "raw orders": [],
@@ -94,12 +94,15 @@ class ProcessOnceTests(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(
             [json.loads(call.kwargs["data"])["id"] for call in session.post.call_args_list],
-            [10282989],
+            [10282989, 10282990, 10282991],
         )
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(len(saved["raw orders"]), 1)
+        self.assertEqual(saved["pending open orders"], [])
+        methods = [call[0] for call in session.method_calls]
+        self.assertLess(max(i for i, name in enumerate(methods) if name == "post"), methods.index("get"))
 
-    def test_recent_finished_open_filters_order_without_stopping_pending(self):
+    def test_recent_finished_open_filters_after_stopping_pending(self):
         now_ms = 1788869900000
         self._write_orders({
             "last timestamp": 0,
@@ -122,10 +125,59 @@ class ProcessOnceTests(unittest.TestCase):
             added = getorder._process_once(session)
 
         self.assertEqual(added, 0)
-        session.post.assert_not_called()
+        session.post.assert_called_once()
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(saved["raw orders"], [])
         self.assertEqual(saved["last timestamp"], 1788869865421)
+
+    def test_cleanup_survives_old_batch_or_fetch_failure(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                self._write_orders({
+                    "last timestamp": 1788869865421, "raw orders": [],
+                    "pending open orders": [{"id": "101"}],
+                    "finished open orders": [],
+                })
+                session = self._session()
+                if failure:
+                    session.get.side_effect = getorder.requests.ConnectionError("offline")
+                with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
+                     mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
+                     mock.patch.object(getorder, "gen_sign", return_value={}):
+                    if failure:
+                        with self.assertRaises(getorder.requests.ConnectionError):
+                            getorder.process_once(session)
+                    else:
+                        self.assertEqual(getorder.process_once(session), 0)
+                    session.get.side_effect = None
+                    self.assertEqual(getorder.process_once(session), 0)
+                session.post.assert_called_once()
+                saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
+                self.assertEqual(saved["pending open orders"], [])
+                self.assertEqual(saved["last timestamp"], 1788869865421)
+                self.assertEqual(saved["raw orders"], [])
+
+    def test_partial_stop_failure_keeps_only_unstopped_records(self):
+        self._write_orders({
+            "last timestamp": 0, "raw orders": [],
+            "pending open orders": [{"id": "101"}, {"id": "102"}],
+            "finished open orders": [],
+        })
+        session = self._session()
+        ok = mock.Mock()
+        failed = mock.Mock()
+        failed.raise_for_status.side_effect = getorder.requests.HTTPError("failed")
+        session.post.side_effect = [ok, failed]
+        with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
+             mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
+             mock.patch.object(getorder, "gen_sign", return_value={}):
+            with self.assertRaises(getorder.requests.HTTPError):
+                getorder.process_once(session)
+        session.get.assert_not_called()
+        saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
+        self.assertEqual(saved["pending open orders"], [{"id": "102"}])
+        self.assertEqual(saved["last timestamp"], 0)
+        self.assertEqual(saved["raw orders"], [])
 
     def test_ongoing_blocks_only_same_contract_and_side(self):
         for contract, side, blocked in [
@@ -151,14 +203,11 @@ class ProcessOnceTests(unittest.TestCase):
                     added = getorder._process_once(session)
 
                 self.assertEqual(added, 0 if blocked else 1)
-                if blocked:
-                    session.post.assert_not_called()
-                else:
-                    session.post.assert_called_once()
-                    self.assertEqual(json.loads(session.post.call_args.kwargs["data"]), {"id": 101})
+                session.post.assert_called_once()
+                self.assertEqual(json.loads(session.post.call_args.kwargs["data"]), {"id": 101})
                 saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
                 self.assertEqual(len(saved["raw orders"]), added)
-                self.assertEqual(saved["pending open orders"], pending)
+                self.assertEqual(saved["pending open orders"], [pending[1]])
                 self.assertEqual(saved["last timestamp"], 1788869865421)
 
     def test_pending_close_seven_day_rule(self):
@@ -197,11 +246,11 @@ class ProcessOnceTests(unittest.TestCase):
                              mock.patch.object(getorder, "gen_sign", return_value={}):
                             added = getorder.process_once(session)
                         self.assertEqual(added, 0 if blocked else 1)
-                        self.assertEqual(session.post.call_count, 0 if blocked else 1)
+                        self.assertEqual(session.post.call_count, 1)
                         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
                         self.assertEqual(len(saved["raw orders"]), added)
                         self.assertEqual(saved["pending close orders"], [pending_close])
-                        self.assertEqual(saved["pending open orders"], pending_open)
+                        self.assertEqual(saved["pending open orders"], [])
                         self.assertEqual(saved["last timestamp"], 1788869865421)
 
     def test_close_side_does_not_match_old_open_rules_and_finished_close_is_ignored(self):
@@ -209,7 +258,7 @@ class ProcessOnceTests(unittest.TestCase):
         close = {"Contract": "DOGE_USDT", "side": "Close Short", "timestamp": str(now_ms)}
         self._write_orders({
             "last timestamp": 0, "raw orders": [],
-            "pending open orders": [dict(close, tag="ongoing open orders"), close],
+            "pending open orders": [dict(close, tag="ongoing open orders")],
             "finished open orders": [close], "finished close orders": [close],
         })
         session = self._session()

@@ -31,12 +31,24 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(side=side):
                 self._full_cycle(side, size, mode, target, replace=True)
 
-    def _full_cycle(self, side, size, mode, target, replace=False):
+    def test_full_cycle_stops_old_open_orders_before_fetch(self):
+        for side, size, mode, target in (
+            ("Open Long", 37, "dual_long", "104"),
+            ("Open Short", -37, "dual_short", "96"),
+        ):
+            with self.subTest(side=side):
+                self._full_cycle(side, size, mode, target, cleanup=True)
+
+    def _full_cycle(self, side, size, mode, target, replace=False, cleanup=False):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             path = Path(directory)
             orders = path / "orders.json"
             orders.write_text(json.dumps([{
-                "last timestamp": 0, "raw orders": [], "pending open orders": [],
+                "last timestamp": 0, "raw orders": [], "pending open orders": [{
+                    "id": "88", "Contract": "ETH_USDT",
+                    "side": "Open Short" if size > 0 else "Open Long",
+                    "tag": "pending open orders",
+                }] if cleanup else [],
                 "finished open orders": [], "pending close orders": [{
                     "id": "99", "Contract": "BTC_USDT", "side": side.replace("Open", "Close"),
                     "timestamp": "1",
@@ -57,10 +69,14 @@ class WorkflowTests(unittest.TestCase):
                 response.status_code = 200
                 response.request = request
                 if request.url == getorder.ORDER_URL:
+                    if cleanup:
+                        current = json.loads(orders.read_text(encoding="utf-8"))[0]
+                        self.assertFalse(any(o["id"] == "88" for o in current["pending open orders"]))
                     body = f"Orders Times: 1\nSymbol: BTC_USDT\nPrice: 100\nSide: {side}\nSize: {10 if size > 0 else -10}\nValue: 1000\n"
                 elif request.url.endswith("/trail/stop"):
-                    self.assertEqual(json.loads(request.body), {"id": 99})
-                    body = json.dumps({"id": "99", "status": "finished"})
+                    stopped_id = 88 if cleanup else 99
+                    self.assertEqual(json.loads(request.body), {"id": stopped_id})
+                    body = json.dumps({"id": str(stopped_id), "status": "finished"})
                 elif request.method == "POST":
                     response.status_code = 201
                     payload = json.loads(request.body)
@@ -104,7 +120,11 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(saved["pending close orders"], [])
                 self.assertEqual(len(saved["finished close orders"]), 1)
                 self.assertEqual(saved["finished close orders"][0]["tag"], "pending close orders.inverse 1")
-            self.assertEqual(sum(r.method == "POST" for r in calls), 3 if replace else 2)
+            self.assertEqual(sum(r.method == "POST" for r in calls), 2 + int(replace) + int(cleanup))
+            if cleanup:
+                self.assertTrue(calls[0].url.endswith("/trail/stop"))
+                self.assertEqual(calls[1].url, getorder.ORDER_URL)
+                self.assertEqual(sum(r.url.endswith("/trail/stop") for r in calls), 1)
             if replace:
                 self.assertEqual([r.url.rsplit("/", 1)[-1] for r in calls if r.method == "POST"],
                                  ["create", "stop", "create"])
@@ -139,6 +159,56 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result["拉取订单"], {"error": "ValueError"})
             for action in (opened, checked, closed):
                 action.assert_called_once_with(session)
+
+    def test_cleanup_failure_preserves_progress_and_continues_other_stages(self):
+        for failure in ("fetch", "stop"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                path = Path(directory)
+                orders = path / "orders.json"
+                pending = [
+                    {"id": "81", "tag": "pending open orders"},
+                    {"id": "82", "tag": "pending open orders"},
+                    {"id": "83", "tag": "ongoing open orders"},
+                ]
+                orders.write_text(json.dumps([{
+                    "last timestamp": 7, "raw orders": [],
+                    "pending open orders": pending, "finished open orders": [],
+                    "pending close orders": [], "finished close orders": [],
+                }]), encoding="utf-8")
+                stack.enter_context(mock.patch.object(getorder, "ORDER_LIST_PATH", orders))
+                stack.enter_context(mock.patch.object(getorder, "LOCK_PATH", path / "lock"))
+                stack.enter_context(mock.patch.object(getorder, "gen_sign", return_value={}))
+                session = mock.Mock()
+                if failure == "stop":
+                    failed = mock.Mock()
+                    failed.raise_for_status.side_effect = requests.HTTPError("stop failed")
+                    session.post.side_effect = [mock.Mock(), failed]
+                else:
+                    session.get.side_effect = requests.Timeout("fetch failed")
+                stages = []
+
+                def remaining_stage(name):
+                    def run(actual_session):
+                        self.assertIs(actual_session, session)
+                        saved = json.loads(orders.read_text(encoding="utf-8"))[0]
+                        self.assertEqual(saved["pending open orders"], pending[1:] if failure == "stop" else pending[2:])
+                        self.assertEqual(saved["last timestamp"], 7)
+                        self.assertEqual(saved["raw orders"], [])
+                        stages.append(name)
+                        return 0
+                    return run
+
+                for module, action in ((pto, "pto"), (checkstatus, "process_once"), (pto, "inverse_pto")):
+                    stack.enter_context(mock.patch.object(module, action, side_effect=remaining_stage(action)))
+                with self.assertLogs(level="ERROR"):
+                    result = main.process_once(session)
+                self.assertEqual(result["拉取订单"], {"error": "HTTPError" if failure == "stop" else "Timeout"})
+                self.assertEqual(stages, ["pto", "process_once", "inverse_pto"])
+                self.assertEqual([json.loads(call.kwargs["data"])["id"] for call in session.post.call_args_list], [81, 82])
+                if failure == "stop":
+                    session.get.assert_not_called()
+                else:
+                    session.get.assert_called_once_with(getorder.ORDER_URL, timeout=getorder.REQUEST_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
