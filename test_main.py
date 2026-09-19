@@ -39,6 +39,7 @@ class WorkflowTests(unittest.TestCase):
                 "last timestamp": 0, "raw orders": [], "pending open orders": [],
                 "finished open orders": [], "pending close orders": [{
                     "id": "99", "Contract": "BTC_USDT", "side": side.replace("Open", "Close"),
+                    "timestamp": "1",
                     "tag": "pending close orders.inverse 98", "status": "open",
                 }] if replace else [], "finished close orders": [],
             }]), encoding="utf-8")

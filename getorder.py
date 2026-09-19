@@ -1,4 +1,39 @@
 '''
+原某部分的工作流:
+检查同币种、同方向的新信号要不要拦截。
+
+      本地已有的记录                                                                  新信号怎么处理
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      finished open orders 中，同币种、同方向的记录，其 timestamp 距现在不超过七天    拦截
+     ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      pending open orders 中，同币种、同方向，且 tag 恰好是 ongoing open orders       拦截，保留旧单
+     ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      pending open orders 中，同币种、同方向，但不是上述 ongoing 标签                 先请求停止旧追踪单，成功后接收新信号
+     ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      只有 pending close orders 或 finished close orders 中有相关记录                 不参与检查，不会拦截新信号
+
+     “同方向”是文字完全相同，例如 Open Short 和 Close Short 不算同方向。价格和数量不参与这项匹配。
+    
+新预期:   检查同币种、同方向的新信号要不要拦截。
+
+      本地已有的记录                                                                  新信号怎么处理
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      finished open orders 中，同币种、同方向的记录，其 timestamp 距现在不超过七天    拦截
+    ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      pending close orders 中，同币种、同方向(这里的'同方向'规则: Open Short 和 Close Short 算同方向)的记录，其 timestamp 距现在不超过七天        拦截，
+     ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      pending open orders 中，同币种、同方向，且 tag 恰好是 ongoing open orders       拦截，保留旧单
+     ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      pending open orders 中，同币种、同方向，但不是上述 ongoing 标签                 先请求停止旧追踪单，成功后接收新信号
+     ──────────────────────────────────────────────────────────────────────────────  ──────────────────────────────────────
+      finished close orders 中有相关记录                 不参与检查，不会拦截新信号
+
+     价格和数量不参与这项匹配。
+     其他工作流不做改变.
+
+     新增“pending close orders 最近七天拦截”规则中，Open/Close 的 Long 或 Short 相同就算同方向（例如 Open Short 与 Close Short），且不论 tag 都
+     拦截；其他三条旧规则仍按 side 文字完全相同匹配。是否按此实现？ 
+     答: 是，仅新增七天规则合并 Open/Close 方向
 '''
 
 import json
@@ -116,6 +151,8 @@ def _load_order_list():
     list_fields = ("raw orders", "pending open orders", "finished open orders")
     if any(not isinstance(root[field], list) for field in list_fields):
         raise OrderDataError("raw orders、pending open orders 和 finished open orders 必须是数组")
+    if not isinstance(root.get("pending close orders", []), list):
+        raise OrderDataError("pending close orders 必须是数组")
     try:
         int(root["last timestamp"])
     except (TypeError, ValueError) as exc:
@@ -167,6 +204,25 @@ def _recent_finished_blocks(order, finished_order, now_ms):
     return 0 <= age_ms <= SEVEN_DAYS_MS
 
 
+def _recent_pending_close_blocks(order, pending_order, now_ms):
+    """最近七天的同币种平仓记录按 Long/Short 匹配，不区分 Open/Close 或 tag。"""
+    if not isinstance(pending_order, dict) or pending_order.get("Contract") != order["Contract"]:
+        return False
+    directions = {
+        "Open Long": "Long", "Close Long": "Long",
+        "Open Short": "Short", "Close Short": "Short",
+    }
+    direction = directions.get(order["side"])
+    side = pending_order.get("side")
+    if direction is None or not isinstance(side, str) or directions.get(side) != direction:
+        return False
+    try:
+        timestamp = int(pending_order["timestamp"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OrderDataError("pending close orders 中存在无效 timestamp") from exc
+    return 0 <= now_ms - timestamp <= SEVEN_DAYS_MS
+
+
 def _stop_trailing_order(session, order_id):
     """向 Gate 发出停止追踪订单请求；失败时由调用方中止本轮写入。"""
     try:
@@ -207,6 +263,10 @@ def _process_once(session):
                 for finished in root["finished open orders"]
             )
             # 同币种同方向已有 ongoing 订单时，保留旧单并拦截新单。
+            and not any(
+                _recent_pending_close_blocks(order, pending, now_ms)
+                for pending in root.get("pending close orders", [])
+            )
             and not any(
                 _same_contract_and_side(order, pending)
                 and pending.get("tag") == "ongoing open orders"

@@ -161,6 +161,64 @@ class ProcessOnceTests(unittest.TestCase):
                 self.assertEqual(saved["pending open orders"], pending)
                 self.assertEqual(saved["last timestamp"], 1788869865421)
 
+    def test_pending_close_seven_day_rule(self):
+        now_ms = 1788869900000
+        cases = [
+            ("DOGE_USDT", "Close Short", 0, True),
+            ("DOGE_USDT", "Open Short", 1000, True),
+            ("DOGE_USDT", "Close Short", getorder.SEVEN_DAYS_MS, True),
+            ("DOGE_USDT", "Close Short", getorder.SEVEN_DAYS_MS + 1, False),
+            ("DOGE_USDT", "Close Short", -1, False),
+            ("DOGE_USDT", "Close Long", 1000, False),
+            ("BTC_USDT", "Close Short", 1000, False),
+        ]
+        for contract, side, age, blocked in cases:
+            for tag in (None, "pending close orders.inverse 1", "ongoing close orders"):
+                for direction in ("Short", "Long"):
+                    with self.subTest(contract=contract, side=side, age=age, tag=tag, direction=direction):
+                        local_side = side if direction == "Short" else side.replace("Short", "TEMP").replace("Long", "Short").replace("TEMP", "Long")
+                        pending_close = {
+                            "Contract": contract, "side": local_side,
+                            "timestamp": str(now_ms - age), "price": "999", "size": "999",
+                        }
+                        if tag is not None:
+                            pending_close["tag"] = tag
+                        pending_open = [{"id": "101", "Contract": "DOGE_USDT", "side": f"Open {direction}"}]
+                        self._write_orders({
+                            "last timestamp": 0, "raw orders": [],
+                            "pending open orders": pending_open, "finished open orders": [],
+                            "pending close orders": [pending_close],
+                        })
+                        session = self._session()
+                        session.get.return_value.text = VALID_REMOTE_TEXT.replace("Open Short", f"Open {direction}")
+                        with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
+                             mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
+                             mock.patch.object(getorder.time, "time", return_value=now_ms / 1000), \
+                             mock.patch.object(getorder, "gen_sign", return_value={}):
+                            added = getorder.process_once(session)
+                        self.assertEqual(added, 0 if blocked else 1)
+                        self.assertEqual(session.post.call_count, 0 if blocked else 1)
+                        saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
+                        self.assertEqual(len(saved["raw orders"]), added)
+                        self.assertEqual(saved["pending close orders"], [pending_close])
+                        self.assertEqual(saved["pending open orders"], pending_open)
+                        self.assertEqual(saved["last timestamp"], 1788869865421)
+
+    def test_close_side_does_not_match_old_open_rules_and_finished_close_is_ignored(self):
+        now_ms = 1788869900000
+        close = {"Contract": "DOGE_USDT", "side": "Close Short", "timestamp": str(now_ms)}
+        self._write_orders({
+            "last timestamp": 0, "raw orders": [],
+            "pending open orders": [dict(close, tag="ongoing open orders"), close],
+            "finished open orders": [close], "finished close orders": [close],
+        })
+        session = self._session()
+        with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
+             mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
+             mock.patch.object(getorder.time, "time", return_value=now_ms / 1000):
+            self.assertEqual(getorder.process_once(session), 1)
+        session.post.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
