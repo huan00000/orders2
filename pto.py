@@ -207,7 +207,7 @@ def _target_price(position):
     if size < 0:
         value = -value
     target_raw = price * (Decimal("1") + margin * Decimal("3.1") / value)
-    target = target_raw * (Decimal("0.99") if size > 0 else Decimal("1.01"))
+    target = target_raw * (Decimal("0.99") if size < 0 else Decimal("1.01"))
     if target <= 0:
         raise PtoError(f"计算出的 target price 必须大于 0，实际为 {target}")
     return _decimal_text(target)
