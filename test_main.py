@@ -16,6 +16,14 @@ from request_log import LoggedSession
 
 class WorkflowTests(unittest.TestCase):
     def test_full_cycle_and_no_duplicate_close(self):
+        for side, size, mode, target in (
+            ("Open Long", 37, "dual_long", "102"),
+            ("Open Short", -37, "dual_short", "98"),
+        ):
+            with self.subTest(side=side):
+                self._full_cycle(side, size, mode, target)
+
+    def _full_cycle(self, side, size, mode, target):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             path = Path(directory)
             orders = path / "orders.json"
@@ -37,7 +45,7 @@ class WorkflowTests(unittest.TestCase):
                 response.status_code = 200
                 response.request = request
                 if request.url == getorder.ORDER_URL:
-                    body = "Orders Times: 1\nSymbol: BTC_USDT\nPrice: 100\nSide: Open Long\nSize: 10\nValue: 1000\n"
+                    body = f"Orders Times: 1\nSymbol: BTC_USDT\nPrice: 100\nSide: {side}\nSize: {10 if size > 0 else -10}\nValue: 1000\n"
                 elif request.method == "POST":
                     response.status_code = 201
                     payload = json.loads(request.body)
@@ -47,9 +55,13 @@ class WorkflowTests(unittest.TestCase):
                     body = json.dumps({"code": 0, "data": {"order": {
                         "id": order_id, "status_code": "success", "trigger_price": "105",
                     }}})
-                elif request.url.endswith("/accounts"):
+                elif request.url.endswith("/positions/BTC_USDT"):
                     self.assertEqual(kwargs["timeout"], 20)
-                    body = '{"cross_available": "10"}'
+                    body = json.dumps([
+                        {"contract": "BTC_USDT", "mode": "dual_short" if size > 0 else "dual_long", "size": 0},
+                        {"contract": "BTC_USDT", "mode": mode, "size": size,
+                         "entry_price": "100", "value": "1000", "initial_margin": "10"},
+                    ])
                 else:
                     raise AssertionError(request.url)
                 response._content = body.encode()
@@ -63,12 +75,15 @@ class WorkflowTests(unittest.TestCase):
                 saved = json.loads(orders.read_text(encoding="utf-8"))[0]
                 self.assertEqual(len(saved["finished open orders"]), 1)
                 self.assertEqual(saved["finished open orders"][0]["price"], "105")
-                # The filled price has no decimal places, so the close target rounds to 105.
-                self.assertEqual(saved["pending close orders"][0]["price"], "105")
+                # 多仓 102.069、空仓 97.869，按成交价的整数精度取整。
+                self.assertEqual(saved["pending close orders"][0]["price"], target)
                 close_payloads = [json.loads(r.body) for r in calls if r.method == "POST"
                                   and json.loads(r.body)["reduce_only"]]
                 self.assertEqual(len(close_payloads), 1)
-                self.assertEqual(close_payloads[0]["activation_price"], "105")
+                self.assertEqual(close_payloads[0]["amount"], str(-size))
+                self.assertEqual(close_payloads[0]["is_gte"], size > 0)
+                self.assertEqual(saved["pending close orders"][0]["side"], side.replace("Open", "Close"))
+                self.assertEqual(close_payloads[0]["activation_price"], target)
                 self.assertEqual(saved["pending close orders"][0]["tag"], "pending close orders.inverse 1")
                 self.assertEqual(main.process_once(session, 2)["发布平仓"], 0)
                 saved = json.loads(orders.read_text(encoding="utf-8"))[0]
@@ -76,6 +91,8 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(len(saved["finished close orders"]), 1)
                 self.assertEqual(saved["finished close orders"][0]["tag"], "pending close orders.inverse 1")
             self.assertEqual(sum(r.method == "POST" for r in calls), 2)
+            self.assertEqual(sum("/positions/" in r.url for r in calls), 1)
+            self.assertFalse(any(r.url.endswith("/accounts") for r in calls))
             log = (path / "logs.md").read_text(encoding="utf-8")
             for expected in ("第 1 轮", "第 2 轮", "reduce_only", "id=1", "HTTP 201", "[已脱敏]"):
                 self.assertIn(expected, log)

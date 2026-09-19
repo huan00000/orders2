@@ -1,5 +1,7 @@
-"""发布追踪委托，并在成功后更新 orderlist.js。
-文件锁与 getorder.py 共用
+"""
+发布追踪委托，并在成功后更新 orderlist.js；文件锁与 getorder.py 共用。
+
+空仓按 size 的负号对持仓 value 取反后计算目标价格。
 """
 
 import json
@@ -13,7 +15,6 @@ from pathlib import Path
 
 import requests
 
-from available import get_cross_available as gavailable
 from general import gen_sign
 
 HOST = "https://api.gateio.ws"
@@ -151,36 +152,82 @@ def _decimal_text(number):
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def _target_price(order, available):
+def _number(record, field):
     try:
-        price = Decimal(_required_text(order, "price"))
-        value = Decimal(_required_text(order, "value"))
-        available = Decimal("0.01") * Decimal(str(available))
+        number = Decimal(_required_text(record, field))
     except (InvalidOperation, ValueError) as exc:
-        raise PtoError("price、value 和 available 必须是有效数字") from exc
-    if price <= 0 or value == 0:
-        raise PtoError("price 必须大于 0，value 不能为 0")
-    target = price * (Decimal("1") + available * Decimal("3.1") / value)
+        raise PtoError(f"{field} 必须是有效数字") from exc
+    if not number.is_finite():
+        raise PtoError(f"{field} 必须是有限数字")
+    return number
+
+
+def _get_position(session, order):
+    contract = _required_text(order, "Contract")
+    modes = {"Open Long": "dual_long", "Open Short": "dual_short"}
+    side = _required_text(order, "side")
+    if side not in modes:
+        raise PtoError(f"不支持的已完成开仓方向: {side}")
+    url = f"/futures/usdt/positions/{contract}"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    headers.update(gen_sign("GET", PREFIX + url, ""))
+    response = session.get(HOST + PREFIX + url, headers=headers,
+                           timeout=REQUEST_TIMEOUT_SECONDS)
+    if response.status_code != 200:
+        raise PtoError(f"查询持仓失败：HTTP {response.status_code}: {response.text}")
+    try:
+        positions = response.json()
+    except ValueError as exc:
+        raise PtoError("持仓响应不是有效 JSON") from exc
+    if isinstance(positions, dict):
+        positions = [positions]
+    if not isinstance(positions, list) or any(not isinstance(p, dict) for p in positions):
+        raise PtoError("持仓响应必须是对象或对象数组")
+    matches = [p for p in positions
+               if p.get("contract") == contract and p.get("mode") == modes[side]]
+    if len(matches) != 1:
+        raise PtoError(f"必须有唯一的 {contract} {modes[side]} 持仓")
+    position = matches[0]
+    size = _number(position, "size")
+    if size == 0 or (size > 0) != (side == "Open Long"):
+        raise PtoError("持仓 size 为 0 或与开仓方向不一致")
+    return position
+
+
+def _target_price(position):
+    """
+    仅使用同一次查询返回的持仓数据计算未取整价格。
+    size < 0 时将 value 取反，多仓保持原值。
+    """
+    price = _number(position, "entry_price")
+    value = _number(position, "value")
+    margin = _number(position, "initial_margin")
+    size = _number(position, "size")
+    if price <= 0 or value == 0 or margin < 0 or size == 0:
+        raise PtoError("entry_price 必须大于 0，value 和 size 不能为 0，initial_margin 不能为负")
+    if size < 0:
+        value = -value
+    target_raw = price * (Decimal("1") + margin * Decimal("3.1") / value)
+    target = target_raw * (Decimal("0.99") if size > 0 else Decimal("1.01"))
     if target <= 0:
         raise PtoError(f"计算出的 target price 必须大于 0，实际为 {target}")
     return _decimal_text(target)
 
 
-def _close_details(order, available):
+def _close_details(order, position):
     mapping = {"Open Short": ("Close Short", False), "Open Long": ("Close Long", True)}
     side = _required_text(order, "side")
     if side not in mapping:
         raise PtoError(f"不支持的已完成开仓方向: {side}")
-    try:
-        close_size = -Decimal(_required_text(order, "size"))
-    except InvalidOperation as exc:
-        raise PtoError("size 必须是有效数字") from exc
-    if close_size == 0:
-        raise PtoError("size 不能为 0")
+    size = _number(position, "size")
+    if size == 0 or (size > 0) != (side == "Open Long"):
+        raise PtoError("持仓 size 为 0 或与开仓方向不一致")
     close_side, is_gte = mapping[side]
-    target = Decimal(_target_price(order, available))
+    target = Decimal(_target_price(position))
     # 按对应 finished open order 的 price 小数位数四舍五入，并保留末尾零。
-    price = Decimal(_required_text(order, "price"))
+    price = _number(order, "price")
+    if price <= 0:
+        raise PtoError("price 必须大于 0")
     step = Decimal("1").scaleb(min(price.as_tuple().exponent, 0))
     target = target.quantize(step, rounding=ROUND_HALF_UP)
     if target <= 0:
@@ -188,7 +235,7 @@ def _close_details(order, available):
     target = format(target, "f")
     payload = {
         "reduce_only": True, "contract": _required_text(order, "Contract"),
-        "amount": _decimal_text(close_size), "activation_price": target,
+        "amount": _decimal_text(-size), "activation_price": target,
         "is_gte": is_gte, "price_type": 3, "price_offset": PRICE_OFFSET, "text": "apiv4",
         "pos_margin_mode": POS_MARGIN_MODE, "position_mode": POSITION_MODE,
     }
@@ -268,11 +315,12 @@ def inverse_pto(session=None):
                     candidates.append(order)
             if not candidates:
                 return 0
-            available = gavailable(session)
             for order in candidates:
                 try:
                     source_id = _required_text(order, "id")
-                    close_side, target, payload = _close_details(order, available)
+                    position = _get_position(session, order)
+                    close_side, target, payload = _close_details(order, position)
+                    _required_text(order, "value")
                     order_id, timestamp = _create_trailing_order(session, payload)
                     pending = _pending_record(
                         order, f"pending close orders.inverse {source_id}", order_id,
