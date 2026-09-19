@@ -1,7 +1,5 @@
 """
 发布追踪委托，并在成功后更新 orderlist.js；文件锁与 getorder.py 共用。
-
-空仓按 size 的负号对持仓 value 取反后计算目标价格。
 """
 
 import json
@@ -16,6 +14,7 @@ from pathlib import Path
 import requests
 
 from general import gen_sign
+from getorder import _stop_trailing_order
 
 HOST = "https://api.gateio.ws"
 PREFIX = "/api/v4"
@@ -293,7 +292,7 @@ def _has_inverse(root, source_id):
 
 
 def inverse_pto(session=None):
-    """为尚无对应平仓单的 finished open orders 发布一轮反向委托。"""
+    """停止同币种同方向旧单，发布成功后替换旧单并移走已完成开仓单。"""
     owns_session = session is None
     session = session or requests.Session()
     published = 0
@@ -321,13 +320,29 @@ def inverse_pto(session=None):
                     position = _get_position(session, order)
                     close_side, target, payload = _close_details(order, position)
                     _required_text(order, "value")
+                    previous = [
+                        pending for pending in root["pending close orders"]
+                        if isinstance(pending, dict)
+                        and pending.get("Contract") == payload["contract"]
+                        and pending.get("side") == close_side
+                    ]
+                    previous_ids = [_required_text(pending, "id") for pending in previous]
+                    for previous_id in previous_ids:
+                        _stop_trailing_order(session, previous_id)
                     order_id, timestamp = _create_trailing_order(session, payload)
                     pending = _pending_record(
                         order, f"pending close orders.inverse {source_id}", order_id,
                         timestamp, close_side, payload["amount"], target,
                     )
-                    root["pending close orders"].append(pending)
-                    _write_order_list(data)
+                    # 先写候选状态，写入失败时不污染本轮后续订单使用的内存状态。
+                    updated = dict(root)
+                    updated["pending close orders"] = [
+                        old for old in root["pending close orders"] if old not in previous
+                    ] + [pending]
+                    updated["finished open orders"] = list(root["finished open orders"])
+                    updated["finished open orders"].remove(order)
+                    _write_order_list([updated])
+                    root.update(updated)
                     published += 1
                 except Exception:
                     logger.exception("平仓订单发布失败，已完成开仓订单保留: %r", order)

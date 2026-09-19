@@ -1,4 +1,9 @@
 import unittest
+import copy
+import json
+import tempfile
+from contextlib import ExitStack
+from pathlib import Path
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
@@ -96,7 +101,7 @@ class PtoResponseTests(unittest.TestCase):
                 patch.object(pto, "_write_order_list") as write, \
                 self.assertLogs(pto.logger, level="ERROR"):
             self.assertEqual(pto.inverse_pto(session), 1)
-        self.assertEqual(root["finished open orders"], [first, second])
+        self.assertEqual(root["finished open orders"], [first])
         self.assertEqual(len(root["pending close orders"]), 1)
         self.assertEqual(root["pending close orders"][0]["tag"], "pending close orders.inverse 2")
         self.assertEqual(root["pending close orders"][0]["size"], "-37")
@@ -133,6 +138,71 @@ class PtoResponseTests(unittest.TestCase):
             self.assertEqual(root["pending open orders"][0]["timestamp"], "1788957279655")
             write.assert_called_once_with([root])
             session.post.assert_called_once()
+
+
+class InverseReplacementTests(unittest.TestCase):
+    def test_replacement_and_failure_retry(self):
+        for side in ("Open Long", "Open Short"):
+            for failure in (None, "stop", "create", "write"):
+                with self.subTest(side=side, failure=failure):
+                    self.check_replacement(side, failure)
+
+    def check_replacement(self, side, failure):
+        source = {"id": "10", "Contract": "BTC_USDT", "price": "100.00",
+                  "side": side, "size": "1", "value": "1000"}
+        old = {"id": "20", "Contract": "BTC_USDT",
+               "side": side.replace("Open", "Close"),
+               "tag": "pending close orders.inverse 9"}
+        other_side = dict(old, id="21", side="Close Short" if side == "Open Long" else "Close Long")
+        other_contract = dict(old, id="22", Contract="ETH_USDT")
+        another_old = dict(old, id="23")
+        root = {"raw orders": [], "pending open orders": [],
+                "finished open orders": [source],
+                "pending close orders": [old, other_side, other_contract, another_old],
+                "finished close orders": []}
+        original = copy.deepcopy(root)
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            path = Path(directory) / "orderlist.js"
+            path.write_text(json.dumps([root]), encoding="utf-8")
+            before = path.read_bytes()
+            stack.enter_context(patch.object(pto, "ORDER_LIST_PATH", path))
+            stack.enter_context(patch.object(pto, "LOCK_PATH", path.with_suffix(".lock")))
+            stack.enter_context(patch.object(pto, "_get_position", return_value=position(
+                size=37 if side == "Open Long" else -37)))
+            events = Mock()
+            stop = stack.enter_context(patch.object(pto, "_stop_trailing_order"))
+            create = stack.enter_context(patch.object(pto, "_create_trailing_order", return_value=("30", "40")))
+            events.attach_mock(stop, "stop")
+            events.attach_mock(create, "create")
+            session = Mock()
+            if failure:
+                if failure == "stop":
+                    stop.side_effect = pto.requests.Timeout("stop failed")
+                elif failure == "create":
+                    create.side_effect = pto.PtoError("create failed")
+                with ExitStack() as errors:
+                    if failure == "write":
+                        errors.enter_context(patch.object(pto, "_write_order_list", side_effect=OSError("disk full")))
+                    errors.enter_context(self.assertLogs(pto.logger, level="ERROR"))
+                    self.assertEqual(pto.inverse_pto(session), 0)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), [original])
+                if failure == "stop":
+                    create.assert_not_called()
+                stop.side_effect = None
+                create.side_effect = None
+                events.reset_mock()
+            self.assertEqual(pto.inverse_pto(session), 1)
+            self.assertEqual([call[0] for call in events.mock_calls], ["stop", "stop", "create"])
+            self.assertEqual([call.args[1] for call in stop.call_args_list], ["20", "23"])
+            saved = json.loads(path.read_text(encoding="utf-8"))[0]
+            self.assertEqual(saved["finished open orders"], [])
+            self.assertEqual(saved["pending close orders"][:2], [other_side, other_contract])
+            self.assertEqual(saved["pending close orders"][2]["id"], "30")
+            self.assertEqual(saved["pending close orders"][2]["tag"], "pending close orders.inverse 10")
+            events.reset_mock()
+            self.assertEqual(pto.inverse_pto(session), 0)
+            self.assertEqual(events.mock_calls, [])
 
 
 class PtoCalculationTests(unittest.TestCase):

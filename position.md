@@ -83,3 +83,90 @@ JSON 数据:
 
 完成e:\git\0AAimportant\gate_bot\ago\v3\auto_orders\tests\orders2\pto.py的修改.使得符合预期.然后完成E:\git\0AAimportant\gate_bot\ago\v3\auto_orders\tests\orders2\test_pto.py. E:\git\0AAimportant\gate_bot\ago\v3\auto_orders\tests\orders2\test_main.py的测试.最后.如有
 没说清楚的地方.请向我提问
+
+"finished open orders": [
+            {
+                "tag": "pending open orders",
+                "id": "1111838",
+                "timestamp": "1789721353576",
+                "Contract": "HYPE_USDT",
+                "price": "90.407",
+                "side": "Open Short",
+                "size": "-18",
+                "value": "-163.13",
+                "status": "finished"
+            },
+            {
+                "tag": "finished open orders",
+                "id": "1112111",
+                "timestamp": "1789736880717",
+                "Contract": "SOL_USDT",
+                "price": "108.27",
+                "side": "Open Short",
+                "size": "-1",
+                "value": "-201.35",
+                "status": "finished"
+            }
+        ]
+
+
+1.
+        "finished open orders": [{
+                "tag": "finished open orders",
+                "id": "1111838",
+                "timestamp": "1789721353576",
+                "Contract": "HYPE_USDT",
+                "price": "90.407",
+                "side": "Open Short",
+                "size": "-18",
+                "value": "-163.13",
+                "status": "finished"
+            }],
+        "pending close orders": [],
+---
+
+pto轮询orderlist.js.看到了"finished open orders"有订单.准备发布inverse_pto前.先对"pending close orders"检查.查看是否有同币种同方向(这里的'同方向'有对应关系.规则: Open Short对应Close Short. Open Long对应Close Long)的订单.分类讨论.如果有:则使用def _stop_trailing_order对"pending close orders"对应的"id": "1111839",向 Gate 发出停止追踪订单请求.如果无:发布inverse_pto.发布成功.把"finished open orders"订单移入到"pending close orders".发布失败.orderlist不改变.
+2.
+        "finished open orders": [],
+        "pending close orders": [{
+                "tag": "pending close orders.inverse 1111838",
+                "id": "1111839",
+                "timestamp": "1789721354576",
+                "Contract": "HYPE_USDT",
+                "price": "88.500",
+                "side": "Close Short",
+                "size": "18",
+                "value": "-163.13",
+                "status": "open"
+            }],
+---
+
+pto轮询orderlist.js.看到了"finished open orders"有订单.准备发布inverse_pto前.先对"pending close orders"检查.查看是否有同币种同方向(这里的'同方向'有对应关系.规则: Open Short对应Close Short. Open Long对应Close Long)的订单.分类讨论.如果有:则使用def _stop_trailing_order对"pending close orders"对应的"id": "1111839",向 Gate 发出停止追踪订单请求.如果无:发布inverse_pto.发布成功.把"finished open orders"订单移入到"pending close orders".发布失败.orderlist不改变.
+3.      "finished open orders": [{
+                "tag": "finished open orders",
+                "id": "1111840",
+                "timestamp": "1789721353576",
+                "Contract": "HYPE_USDT",
+                "price": "99.507",
+                "side": "Open Short",
+                "size": "-18",
+                "value": "-163.13",
+                "status": "finished"
+            }],
+        "pending close orders": [{
+                "tag": "pending close orders.inverse 1111838",
+                "id": "1111841",
+                "timestamp": "1789721354577",
+                "Contract": "HYPE_USDT",
+                "price": "78.600",
+                "side": "Close Short",
+                "size": "30",
+                "value": "-363.13",
+                "status": "open"
+            }],
+
+发现同币种同方向的旧平仓追踪单后，停止成功时应如何继续？
+答: 本轮立即发布新平仓单，成功后删除旧单并移走 finished open 原单
+
+如果旧单已停止成功，但新平仓单发布失败，你写的“orderlist 不改变”是否也适用？
+答: 适用：文件完全保持原样，后续轮询重试 
