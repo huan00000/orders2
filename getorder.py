@@ -1,15 +1,5 @@
-'''
+r'''
 原工作流顺序为:
-1. 去 GitHub 读取 size.txt，提取币种、价格、做多还是做空、数量等信息。
-2. 看是不是新一批订单：根据时间戳判断，已经处理过的直接跳过。
-3. 筛掉重复或暂时不能开的订单，例如同一个币、同一个方向：
-    - 最近 7 天有已完成的开仓记录；
-    - 最近 7 天有待平仓记录；
-    - 已有标记为 ongoing open orders 的开仓订单。
-
-4. 处理旧追踪单：新订单通过筛选后，如果还有同币种、同方向、非 ongoing 的待开仓单，就调用 Gate 接口停止旧追踪单。
-5. 把新订单追加到本地 orderlist.js 的 raw orders，并更新“这批已经处理过”的时间戳。即使全部被筛掉，也更新时间戳。
-新预期: 顺序修改为:
 1. 处理旧追踪单：如果有待开仓单，就调用 Gate 接口停止旧追踪单。
 2. 去 GitHub 读取 size.txt，提取币种、价格、做多还是做空、数量等信息。
 3. 看是不是新一批订单：根据时间戳判断，已经处理过的直接跳过。
@@ -20,12 +10,18 @@
 
 5. 把新订单追加到本地 orderlist.js 的 raw orders，并更新“这批已经处理过”的时间戳。即使全部被筛掉，也更新时间戳。
 
+新预期: 顺序修改为:
+1. 去 GitHub 读取 size.txt，提取币种、价格、做多还是做空、数量等信息。
+2. 看是不是新一批订单：根据时间戳判断，已经处理过的直接跳过。下列分类讨论: 如果是新一批订单,处理旧追踪单：如果有待开仓单，就调用 Gate 接口停止旧追踪单。如果不是新一批订单,则不处理旧追踪单
+3. 筛掉重复或暂时不能开的订单，例如同一个币、同一个方向：
+    - 最近 7 天有已完成的开仓记录；
+    - 最近 7 天有待平仓记录；
+    - 已有标记为 ongoing open orders 的开仓订单。
 
-1. 第一步停止旧追踪单，是否停止 pending open orders 中所有非 ongoing 的订单，不再限制币种、方向？标记为 ongoing open orders 的订单是否仍保
-     留？
-答: 是. 是
-2. 停止成功后，是否从本地 pending open orders 删除对应记录？如果保留，新流程会在每轮读取 GitHub 前再次请求停止同一订单。
-答: 是. 不保留
+4. 把新订单追加到本地 orderlist.js 的 raw orders，并更新“这批已经处理过”的时间戳。即使全部被筛掉，也更新时间戳。
+
+
+然后完成E:\git\0AAimportant\gate_bot\ago\v3\auto_orders\tests\orders2\test_main.py和E:\git\0AAimportant\gate_bot\ago\v3\auto_orders\tests\orders2\test_getorder.py的测试
 '''
 
 import json
@@ -235,10 +231,17 @@ def _stop_trailing_order(session, order_id):
 
 
 def _process_once(session):
-    # 清理独立于远程批次；逐个保存成功结果，后续失败也不会恢复已停订单。
+    response = session.get(ORDER_URL, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    remote_timestamp, remote_orders = _parse_remote_orders(response.text)
+
     with _order_file_lock():
         data = _load_order_list()
         root = data[0]
+        if int(root["last timestamp"]) >= remote_timestamp:
+            return 0
+
+        # 仅新批次清理旧追踪单；逐笔保存，后续失败也保留已停止结果。
         for pending in list(root["pending open orders"]):
             if pending.get("tag") == "ongoing open orders":
                 continue
@@ -252,16 +255,6 @@ def _process_once(session):
                 or str(item.get("id", "")).strip() != order_id
             ]
             _write_order_list(data)
-
-    response = session.get(ORDER_URL, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    remote_timestamp, remote_orders = _parse_remote_orders(response.text)
-
-    with _order_file_lock():
-        data = _load_order_list()
-        root = data[0]
-        if int(root["last timestamp"]) >= remote_timestamp:
-            return 0
 
         now_ms = int(time.time() * 1000)
         accepted = [

@@ -68,7 +68,7 @@ class ProcessOnceTests(unittest.TestCase):
         session.post.return_value.raise_for_status.return_value = None
         return session
 
-    def test_stops_all_non_ongoing_pending_once_before_fetch(self):
+    def test_stops_all_non_ongoing_pending_once_after_fetch(self):
         self._write_orders({
             "last timestamp": 0,
             "raw orders": [],
@@ -100,7 +100,7 @@ class ProcessOnceTests(unittest.TestCase):
         self.assertEqual(len(saved["raw orders"]), 1)
         self.assertEqual(saved["pending open orders"], [])
         methods = [call[0] for call in session.method_calls]
-        self.assertLess(max(i for i, name in enumerate(methods) if name == "post"), methods.index("get"))
+        self.assertLess(methods.index("get"), min(i for i, name in enumerate(methods) if name == "post"))
 
     def test_recent_finished_open_filters_after_stopping_pending(self):
         now_ms = 1788869900000
@@ -130,32 +130,39 @@ class ProcessOnceTests(unittest.TestCase):
         self.assertEqual(saved["raw orders"], [])
         self.assertEqual(saved["last timestamp"], 1788869865421)
 
-    def test_cleanup_survives_old_batch_or_fetch_failure(self):
-        for failure in (False, True):
-            with self.subTest(failure=failure):
-                self._write_orders({
-                    "last timestamp": 1788869865421, "raw orders": [],
+    def test_old_batch_or_fetch_failure_leaves_pending_untouched(self):
+        for case in ("same", "older", "connection", "http", "invalid"):
+            with self.subTest(case=case):
+                root = {
+                    "last timestamp": 1788869865422 if case == "older" else 1788869865421,
+                    "raw orders": [],
                     "pending open orders": [{"id": "101"}],
                     "finished open orders": [],
-                })
+                }
+                self._write_orders(root)
+                original = self.order_path.read_bytes()
                 session = self._session()
-                if failure:
-                    session.get.side_effect = getorder.requests.ConnectionError("offline")
+                error = None
+                if case == "connection":
+                    error = getorder.requests.ConnectionError
+                    session.get.side_effect = error("offline")
+                elif case == "http":
+                    error = getorder.requests.HTTPError
+                    session.get.return_value.raise_for_status.side_effect = error("failed")
+                elif case == "invalid":
+                    error = getorder.OrderDataError
+                    session.get.return_value.text = "invalid orders"
                 with mock.patch.object(getorder, "ORDER_LIST_PATH", self.order_path), \
                      mock.patch.object(getorder, "LOCK_PATH", self.lock_path), \
-                     mock.patch.object(getorder, "gen_sign", return_value={}):
-                    if failure:
-                        with self.assertRaises(getorder.requests.ConnectionError):
+                     mock.patch.object(getorder, "gen_sign") as sign:
+                    if error:
+                        with self.assertRaises(error):
                             getorder.process_once(session)
                     else:
                         self.assertEqual(getorder.process_once(session), 0)
-                    session.get.side_effect = None
-                    self.assertEqual(getorder.process_once(session), 0)
-                session.post.assert_called_once()
-                saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
-                self.assertEqual(saved["pending open orders"], [])
-                self.assertEqual(saved["last timestamp"], 1788869865421)
-                self.assertEqual(saved["raw orders"], [])
+                    sign.assert_not_called()
+                session.post.assert_not_called()
+                self.assertEqual(self.order_path.read_bytes(), original)
 
     def test_partial_stop_failure_keeps_only_unstopped_records(self):
         self._write_orders({
@@ -173,7 +180,7 @@ class ProcessOnceTests(unittest.TestCase):
              mock.patch.object(getorder, "gen_sign", return_value={}):
             with self.assertRaises(getorder.requests.HTTPError):
                 getorder.process_once(session)
-        session.get.assert_not_called()
+        session.get.assert_called_once_with(getorder.ORDER_URL, timeout=getorder.REQUEST_TIMEOUT_SECONDS)
         saved = json.loads(self.order_path.read_text(encoding="utf-8"))[0]
         self.assertEqual(saved["pending open orders"], [{"id": "102"}])
         self.assertEqual(saved["last timestamp"], 0)

@@ -31,7 +31,7 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(side=side):
                 self._full_cycle(side, size, mode, target, replace=True)
 
-    def test_full_cycle_stops_old_open_orders_before_fetch(self):
+    def test_full_cycle_stops_old_open_orders_after_fetch(self):
         for side, size, mode, target in (
             ("Open Long", 37, "dual_long", "104"),
             ("Open Short", -37, "dual_short", "96"),
@@ -71,7 +71,8 @@ class WorkflowTests(unittest.TestCase):
                 if request.url == getorder.ORDER_URL:
                     if cleanup:
                         current = json.loads(orders.read_text(encoding="utf-8"))[0]
-                        self.assertFalse(any(o["id"] == "88" for o in current["pending open orders"]))
+                        self.assertEqual(any(o["id"] == "88" for o in current["pending open orders"]),
+                                         sum(r.url == getorder.ORDER_URL for r in calls) == 1)
                     body = f"Orders Times: 1\nSymbol: BTC_USDT\nPrice: 100\nSide: {side}\nSize: {10 if size > 0 else -10}\nValue: 1000\n"
                 elif request.url.endswith("/trail/stop"):
                     stopped_id = 88 if cleanup else 99
@@ -122,8 +123,8 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(saved["finished close orders"][0]["tag"], "pending close orders.inverse 1")
             self.assertEqual(sum(r.method == "POST" for r in calls), 2 + int(replace) + int(cleanup))
             if cleanup:
-                self.assertTrue(calls[0].url.endswith("/trail/stop"))
-                self.assertEqual(calls[1].url, getorder.ORDER_URL)
+                self.assertEqual(calls[0].url, getorder.ORDER_URL)
+                self.assertTrue(calls[1].url.endswith("/trail/stop"))
                 self.assertEqual(sum(r.url.endswith("/trail/stop") for r in calls), 1)
             if replace:
                 self.assertEqual([r.url.rsplit("/", 1)[-1] for r in calls if r.method == "POST"],
@@ -179,6 +180,7 @@ class WorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(getorder, "LOCK_PATH", path / "lock"))
                 stack.enter_context(mock.patch.object(getorder, "gen_sign", return_value={}))
                 session = mock.Mock()
+                session.get.return_value.text = "Orders Times: 8\nSymbol: BTC_USDT\nPrice: 100\nSide: Open Long\nSize: 10\nValue: 1000\n"
                 if failure == "stop":
                     failed = mock.Mock()
                     failed.raise_for_status.side_effect = requests.HTTPError("stop failed")
@@ -191,7 +193,7 @@ class WorkflowTests(unittest.TestCase):
                     def run(actual_session):
                         self.assertIs(actual_session, session)
                         saved = json.loads(orders.read_text(encoding="utf-8"))[0]
-                        self.assertEqual(saved["pending open orders"], pending[1:] if failure == "stop" else pending[2:])
+                        self.assertEqual(saved["pending open orders"], pending[1:] if failure == "stop" else pending)
                         self.assertEqual(saved["last timestamp"], 7)
                         self.assertEqual(saved["raw orders"], [])
                         stages.append(name)
@@ -204,11 +206,9 @@ class WorkflowTests(unittest.TestCase):
                     result = main.process_once(session)
                 self.assertEqual(result["拉取订单"], {"error": "HTTPError" if failure == "stop" else "Timeout"})
                 self.assertEqual(stages, ["pto", "process_once", "inverse_pto"])
-                self.assertEqual([json.loads(call.kwargs["data"])["id"] for call in session.post.call_args_list], [81, 82])
-                if failure == "stop":
-                    session.get.assert_not_called()
-                else:
-                    session.get.assert_called_once_with(getorder.ORDER_URL, timeout=getorder.REQUEST_TIMEOUT_SECONDS)
+                self.assertEqual([json.loads(call.kwargs["data"])["id"] for call in session.post.call_args_list],
+                                 [81, 82] if failure == "stop" else [])
+                session.get.assert_called_once_with(getorder.ORDER_URL, timeout=getorder.REQUEST_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
