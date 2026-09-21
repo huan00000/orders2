@@ -1,0 +1,7 @@
+完成剩余的计划/阶段操作
+准备操作前,先查看企划书.md,需求.md,验收报告.md.然后智慧进行规划多个阶段
+0AAimportant/gate_bot/ago/v3/auto_orders/tests/orders2/c/docs/企划书.md
+0AAimportant/gate_bot/ago/v3/auto_orders/tests/orders2/c/docs/需求.md
+0AAimportant/gate_bot/ago/v3/auto_orders/tests/orders2/c/docs/验收报告.md
+每次任务只完成1个阶段的操作.剩余操作留给明天执行
+完成1个阶段的操作后.在验收报告.md完成信息对称.结束操作
