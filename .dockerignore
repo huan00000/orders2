@@ -1,12 +1,1 @@
 **
-!requirements.txt
-!Dockerfile
-!main.py
-!request_log.py
-!general.py
-!available.py
-!getorder.py
-!pto.py
-!checkstatus.py
-!container_entrypoint.py
-!orderlist.example.js
